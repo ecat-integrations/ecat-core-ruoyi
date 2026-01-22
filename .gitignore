@@ -1,0 +1,4 @@
+**/bk*.java
+# Auto-added essential ignore rules
+*.log
+target/
