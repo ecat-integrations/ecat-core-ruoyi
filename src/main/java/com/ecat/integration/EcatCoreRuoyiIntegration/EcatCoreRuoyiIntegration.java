@@ -3,6 +3,7 @@ package com.ecat.integration.EcatCoreRuoyiIntegration;
 import java.net.URLClassLoader;
 import java.util.Map;
 import com.ecat.core.Integration.IntegrationBase;
+import com.ecat.core.Log.ClassLoaderCoordinateFilter;
 import com.ecat.core.Utils.DynamicConfig.ConfigDefinition;
 import com.ecat.core.Utils.DynamicConfig.ConfigItem;
 import com.ecat.core.Utils.DynamicConfig.ConfigItemBuilder;
@@ -61,6 +62,15 @@ public class EcatCoreRuoyiIntegration extends IntegrationBase {
     @Override
     public void onStart() {
         log.info("EcatCoreRuoyiIntegration started");
+
+        // 注册 ruoyi 及其依赖的包名前缀
+        // 这样 ruoyi-admin.jar 内部的所有日志都会路由到 ruoyi 集成
+        String ruoyiCoordinate = "com.ecat:integration-ecat-core-ruoyi";
+        ClassLoaderCoordinateFilter.registerPackagePrefix("com.ruoyi", ruoyiCoordinate);
+        ClassLoaderCoordinateFilter.registerPackagePrefix("org.springframework", ruoyiCoordinate);
+        ClassLoaderCoordinateFilter.registerPackagePrefix("org.mybatis", ruoyiCoordinate);
+        ClassLoaderCoordinateFilter.registerPackagePrefix("com.alibaba.druid", ruoyiCoordinate);
+
         if (ruoyiAdminJarPath != null && !ruoyiAdminJarPath.isEmpty()) {
 
             ruoyiJarApp = new RuoyiJarApp();
