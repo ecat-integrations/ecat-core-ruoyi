@@ -100,7 +100,7 @@ public class EcatCoreRuoyiIntegration extends IntegrationBase {
     }
 
     @Override
-    public void onRelease() {
+    protected void onReleaseImpl() {
 
     }
 
