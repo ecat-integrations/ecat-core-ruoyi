@@ -82,7 +82,8 @@ public class RuoyiSysMigrationTest {
         DataSource ds = mock(DataSource.class);
         URLClassLoader fakeChildClassLoader = mock(URLClassLoader.class);
         IntegrationLoadOption loadOption = mock(IntegrationLoadOption.class);
-        setPrivateField(integration, "ruoyiAdminJarPath", "/fake/ruoyi-admin.jar");
+        // T-1-10 起 onStart 条件源=定位结果(非配置路径原值);USER_FILE 形态下 start 调用形不变
+        setPrivateField(integration, "adminLocation", AdminLocation.userFile("/fake/ruoyi-admin.jar"));
         setPrivateField(integration, "loadOption", loadOption);
 
         try (MockedConstruction<RuoyiJarApp> bridge = Mockito.mockConstruction(RuoyiJarApp.class,
@@ -107,7 +108,8 @@ public class RuoyiSysMigrationTest {
         EcatCoreRuoyiIntegration integration = new EcatCoreRuoyiIntegration();
         URLClassLoader fakeChildClassLoader = mock(URLClassLoader.class);
         IntegrationLoadOption loadOption = mock(IntegrationLoadOption.class);
-        setPrivateField(integration, "ruoyiAdminJarPath", "/fake/ruoyi-admin.jar");
+        // T-1-10 起 onStart 条件源=定位结果(非配置路径原值);USER_FILE 形态下 start 调用形不变
+        setPrivateField(integration, "adminLocation", AdminLocation.userFile("/fake/ruoyi-admin.jar"));
         setPrivateField(integration, "loadOption", loadOption);
 
         try (MockedConstruction<RuoyiJarApp> bridge = Mockito.mockConstruction(RuoyiJarApp.class,

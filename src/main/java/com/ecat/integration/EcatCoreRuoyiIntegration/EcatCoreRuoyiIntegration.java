@@ -25,6 +25,7 @@ public class EcatCoreRuoyiIntegration extends IntegrationBase {
 
     private boolean isRuoyiStarted = false;
     private RuoyiJarApp ruoyiJarApp;
+    private AdminLocation adminLocation;
     private Map<String, Object> integrationConfig;
 
     // 配置检查相关
@@ -43,7 +44,7 @@ public class EcatCoreRuoyiIntegration extends IntegrationBase {
             settingsConfigDefinition = new ConfigDefinition();
             StringLengthValidator stringValidator = new StringLengthValidator(1, 255);
             ConfigItemBuilder builder = new ConfigItemBuilder()
-                    .add(new ConfigItem<>("ruoyi_admin_jar_path", String.class, true, null, stringValidator));
+                    .add(new ConfigItem<>("ruoyi_admin_jar_path", String.class, false, null, stringValidator));
             settingsConfigDefinition.define(builder);
         }
         return settingsConfigDefinition;
@@ -68,6 +69,13 @@ public class EcatCoreRuoyiIntegration extends IntegrationBase {
                 ruoyiAdminJarPath = (String) settings.get("ruoyi_admin_jar_path");
             }
         }
+
+        // 定位挂 onInit=失败显形路径:异常沿 loadSingleIntegration 上抛记 failure,不被 onStart 既有 catch 吞。
+        // 路径未指定(null/校验拒绝/键缺失,三态语义统一=未指定)走自身包嵌入载荷嵌读定位(D2');
+        // 启动零网络零写盘。定位必须置于 settings 判空块之外——无配置实例的空机场景同样要定位。
+        adminLocation = RuoyiAdminResolver.resolve(getClass(),
+                ruoyiAdminJarPath, RuoyiAdminResolver.readBridgeVersion(getClass()));
+        log.info("ruoyi-admin 定位完成: {}", adminLocation.describe());
     }
 
     @Override
@@ -82,15 +90,21 @@ public class EcatCoreRuoyiIntegration extends IntegrationBase {
         ClassLoaderCoordinateFilter.registerPackagePrefix("org.mybatis", ruoyiCoordinate);
         ClassLoaderCoordinateFilter.registerPackagePrefix("com.alibaba.druid", ruoyiCoordinate);
 
-        if (ruoyiAdminJarPath != null && !ruoyiAdminJarPath.isEmpty()) {
+        if (adminLocation != null) {
 
             ruoyiJarApp = new RuoyiJarApp();
 
             URLClassLoader childClassLoader = null;
             try {
-                childClassLoader = ruoyiJarApp.start(ruoyiAdminJarPath, null, new String[] {});
+                // 按定位形态分路:USER_FILE=现行文件形态;NESTED_ENTRY=嵌读直启(包内条目,零落盘)。
+                if (adminLocation.getMode() == AdminLocation.Mode.USER_FILE) {
+                    childClassLoader = ruoyiJarApp.start(adminLocation.getFilePath(), null, new String[] {});
+                } else {
+                    childClassLoader = ruoyiJarApp.startNested(adminLocation.getBridgeJarPath(),
+                            adminLocation.getAdminEntryName(), new String[] {});
+                }
             } catch (Exception e) {
-                log.error("Failed to start RuoyiJarApp with jar path: " + ruoyiAdminJarPath, e);
+                log.error("Failed to start RuoyiJarApp: {}", adminLocation.describe(), e);
             }
 
             if (childClassLoader == null) {
@@ -109,11 +123,8 @@ public class EcatCoreRuoyiIntegration extends IntegrationBase {
             runRuoyiSysMigration();
 
             this.loadOption.setChildClassLoader(childClassLoader);
-            log.info("Loading Ruoyi admin jar from path: {}", ruoyiAdminJarPath);
+            log.info("Loading Ruoyi admin jar: {}", adminLocation.describe());
 
-        } else {
-            log.error("Ruoyi admin jar path is not set or is empty.");
-            return;
         }
 
     }

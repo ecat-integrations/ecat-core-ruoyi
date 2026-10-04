@@ -13,6 +13,12 @@
       <directory>${project.build.outputDirectory}</directory>
       <outputDirectory>/</outputDirectory> <!-- 自身类直接放在 jar 根目录 -->
     </fileSet>
+    <!-- 嵌入载荷(payload/ruoyi-admin-{v}.jar):lib/ 归 dependencySet 语义管辖,
+         payload/ 独立命名空间(打包载荷),语义分立避免两类「包内 jar」混淆 -->
+    <fileSet>
+      <directory>${project.build.directory}/payload</directory>
+      <outputDirectory>/payload/</outputDirectory>
+    </fileSet>
   </fileSets>
   
   <!-- 2. 依赖 jar 打包到 lib/ 目录（保持完整 jar 结构） -->

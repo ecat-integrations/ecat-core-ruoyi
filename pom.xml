@@ -38,6 +38,11 @@
       <artifactId>mockito-inline</artifactId>
       <scope>test</scope>
     </dependency>
+    <dependency>
+      <groupId>org.projectlombok</groupId>
+      <artifactId>lombok</artifactId>
+      <scope>provided</scope>
+    </dependency>
   </dependencies>
   <build>
     <plugins>
@@ -53,6 +58,16 @@
           <archiverConfig>
             <compress>false</compress>
           </archiverConfig>
+          <!-- archive 块与 archiverConfig 双写 compress=false:Stored 是嵌读的功能性硬前提
+               (loader 嵌套 JarFile 靠随机访问读外层文件内偏移,Deflated 嵌套条目不可随机访问);
+               两通道取值恒 false,无论哪个后执行都不翻转。Implementation-Version=运行期
+               readBridgeVersion 的版本唯一材料。 -->
+          <archive>
+            <compress>false</compress>
+            <manifestEntries>
+              <Implementation-Version>${project.version}</Implementation-Version>
+            </manifestEntries>
+          </archive>
         </configuration>
         <executions>
           <execution>
@@ -60,6 +75,36 @@
             <goals>
               <goal>single</goal>
             </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <!-- 构建期嵌入取件:按自身版本从公仓取 ruoyi-admin 单件进 target/payload(assembly
+           fileSet 进包内 /payload)。显式 artifactItems 枚举单件,禁用依赖树式取件——
+           admin 是 spring-boot fat jar,BOOT-INF/lib 自带全部依赖,树式解析=双倍包陷阱;
+           桥接 pom 禁止出现 ruoyi-admin 的 <dependency> 条目(运行载荷非编译依赖)。
+           公仓无同版本 admin=Maven 解析红构建失败(发车序:ruoyi 族先发、桥接后发)。 -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <version>3.6.1</version>
+        <executions>
+          <execution>
+            <id>copy-embedded-payload</id>
+            <phase>prepare-package</phase>
+            <goals>
+              <goal>copy</goal>
+            </goals>
+            <configuration>
+              <artifactItems>
+                <artifactItem>
+                  <groupId>com.ecat</groupId>
+                  <artifactId>ruoyi-admin</artifactId>
+                  <version>${project.version}</version>
+                  <type>jar</type>
+                </artifactItem>
+              </artifactItems>
+              <outputDirectory>${project.build.directory}/payload</outputDirectory>
+            </configuration>
           </execution>
         </executions>
       </plugin>

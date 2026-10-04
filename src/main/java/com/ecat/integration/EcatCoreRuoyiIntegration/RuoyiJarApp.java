@@ -42,32 +42,70 @@ public class RuoyiJarApp {
             }
         }
 
-        try{
-            // 1. 构造 fat jar Archive，注意资源释放
+        try {
+            // 构造 fat jar Archive，注意资源释放
             try (Archive archive = new JarFileArchive(new File(fatJarPath))) {
-                // 2. 收集所有嵌套 jar 和 classes 目录的 URL
-                List<URL> urls = new ArrayList<>();
-                for (Iterator<Archive> it = archive.getNestedArchives(
-                        entry -> (entry.isDirectory() && entry.getName().equals("BOOT-INF/classes/")) || entry.getName().endsWith(".jar"),
-                        entry -> true); it.hasNext(); ) {
-                    Archive nested = it.next();
-                    urls.add(nested.getUrl());
-                }
-
-                // 3. 构造 LaunchedURLClassLoader
-                LaunchedURLClassLoader classLoader = new LaunchedURLClassLoader(urls.toArray(new URL[0]), getClass().getClassLoader());
-
-                Thread.currentThread().setContextClassLoader(classLoader);
-
-                // 4. 加载并启动主类
-                mainClass = classLoader.loadClass(mainClassName);
-                mainClass.getMethod("main", String[].class).invoke(null, (Object) args);
-
-                return classLoader;
+                return launch(archive, mainClassName, args);
             }
         } catch (Exception e) {
             throw new RuntimeException("启动ruoyi-admin失败: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * 嵌读形态入口(D2'):admin 不是独立文件,而是桥接自身包内的嵌入载荷条目。
+     * 机制=现行 spring-boot-loader 嵌套加载「只换根不换法」:根 Archive 换成桥接包,
+     * 嵌套 admin Archive 经精确名滤器取得(结构性至多一条);Start-Class 从嵌套 admin
+     * 的 manifest 读(桥接包自身 manifest 无 Start-Class,外层读法在嵌套形态下不适用)。
+     *
+     * @param bridgeJarPath 桥接自身 jar 物理路径(嵌读输入,零落盘零解压)
+     * @param adminEntryName 载荷条目名(payload/ruoyi-admin-{v}.jar,精确名=版本门)
+     * @throws IllegalStateException 桥接包内无该载荷条目(构建缺陷第二道门,防目录形态漂移)
+     */
+    public URLClassLoader startNested(String bridgeJarPath, String adminEntryName, String[] args) throws Exception {
+        try (Archive bridgeArchive = new JarFileArchive(new File(bridgeJarPath))) {
+            Iterator<Archive> nested = bridgeArchive.getNestedArchives(
+                    entry -> entry.getName().equals(adminEntryName), entry -> true);
+            if (!nested.hasNext()) {
+                throw new IllegalStateException("桥接包内无嵌入载荷条目: " + adminEntryName
+                        + "(构建缺陷:dependency-plugin copy/fileSet 两块缺失)");
+            }
+            try (Archive adminArchive = nested.next()) {
+                java.util.jar.Manifest manifest = adminArchive.getManifest();
+                if (manifest == null) {
+                    throw new IllegalStateException("嵌套 admin 包无 MANIFEST: " + adminEntryName);
+                }
+                String startClass = manifest.getMainAttributes().getValue("Start-Class");
+                if (startClass == null || startClass.isEmpty()) {
+                    throw new IllegalStateException("嵌套 admin 包 MANIFEST 无 Start-Class: " + adminEntryName);
+                }
+                return launch(adminArchive, startClass, args);
+            }
+        }
+    }
+
+    /**
+     * 两入口公共尾:收集滤器→LaunchedURLClassLoader→setContextClassLoader→loadClass→main invoke。
+     * 与既有 start 的文件形态逻辑逐字同源(消除复制)。
+     */
+    private URLClassLoader launch(Archive adminArchive, String mainClassName, String[] args) throws Exception {
+        // 收集所有嵌套 jar 和 classes 目录的 URL
+        List<URL> urls = new ArrayList<>();
+        for (Iterator<Archive> it = adminArchive.getNestedArchives(
+                entry -> (entry.isDirectory() && entry.getName().equals("BOOT-INF/classes/")) || entry.getName().endsWith(".jar"),
+                entry -> true); it.hasNext(); ) {
+            Archive nested = it.next();
+            urls.add(nested.getUrl());
+        }
+
+        LaunchedURLClassLoader classLoader = new LaunchedURLClassLoader(urls.toArray(new URL[0]), getClass().getClassLoader());
+
+        Thread.currentThread().setContextClassLoader(classLoader);
+
+        mainClass = classLoader.loadClass(mainClassName);
+        mainClass.getMethod("main", String[].class).invoke(null, (Object) args);
+
+        return classLoader;
     }
 
     public void loadJarAndVue(URLClassLoader targetClassLoader, IntegrationBase target) throws Exception {
