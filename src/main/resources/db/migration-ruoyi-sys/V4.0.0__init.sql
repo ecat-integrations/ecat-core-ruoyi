@@ -8,6 +8,8 @@
 -- 来源拆分与逐表对账由十二域基线生成器产出,对账矩阵与差集记录随交付验收材料提供。
 -- 库：PG 主库 public schema。幂等性说明：纯 DDL+种子（无 IF NOT EXISTS），依赖 flyway 账本单次执行——
 --   已应用行/基线行挡住重放；绕过账本的人工重跑会报对象已存在，此为预期防呆。
+-- 基准源指纹（sha256，提取日期 2026-10-04；源件随旧件清零删除，git 史可稽）：
+--   00ebd13b0a4762ea8156ce8122ab9e49642429230c47ad3444124208b285ef5c  ecat-integrations/ruoyi/sql/public_no_shard.sql
 
 CREATE SEQUENCE "public"."gen_table_column_column_id_seq" 
 INCREMENT 1
