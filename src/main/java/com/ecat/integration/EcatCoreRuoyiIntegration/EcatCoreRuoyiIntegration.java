@@ -1,13 +1,14 @@
 package com.ecat.integration.EcatCoreRuoyiIntegration;
 
 import java.net.URLClassLoader;
-import java.util.Collections;
+import java.time.LocalDateTime;
 import java.util.Map;
 
 import javax.sql.DataSource;
 
 import com.ecat.core.Integration.IntegrationBase;
 import com.ecat.core.Log.ClassLoaderCoordinateFilter;
+import com.ecat.core.Upgrade.BackupHook;
 import com.ecat.core.Utils.DynamicConfig.ConfigDefinition;
 import com.ecat.core.Utils.DynamicConfig.ConfigItem;
 import com.ecat.core.Utils.DynamicConfig.ConfigItemBuilder;
@@ -17,11 +18,15 @@ import com.ecat.integration.EcatDbMigration.DbMigrationFacade;
 /**
  * EcatCoreRuoyiIntegration is a custom integration solution for integrating
  * ECAT with the Ruoyi framework.
- * 
+ *
+ * <p>宿主集成双职责:①db 代理——租户注册即发现(扫租户 jar 约定目录),先迁后装,
+ * 失败=租户不装载;自身域 ruoyi-sys 同走入口②(第一个租户)。②备份参与者——实现
+ * {@link BackupHook},本轮空跑模式,升级窗程序的派发/账本/日志面真实。</p>
+ *
  * @author coffee
  */
 
-public class EcatCoreRuoyiIntegration extends IntegrationBase {
+public class EcatCoreRuoyiIntegration extends IntegrationBase implements BackupHook {
 
     private boolean isRuoyiStarted = false;
     private RuoyiJarApp ruoyiJarApp;
@@ -31,12 +36,6 @@ public class EcatCoreRuoyiIntegration extends IntegrationBase {
     // 配置检查相关
     private ConfigDefinition settingsConfigDefinition;
     private String ruoyiAdminJarPath;
-
-    /** ruoyi-sys 域标识(与 ecat-config.yml 的 db.domain 及脚本目录 migration-ruoyi-sys 同名)。 */
-    static final String DB_DOMAIN = "ruoyi-sys";
-
-    /** Flyway 脚本扫描位(字面量,不做拼接)。 */
-    static final String DB_LOCATION = "classpath:db/migration-ruoyi-sys";
 
     // 校验settings配置定义
     public ConfigDefinition getSettingsConfigDefinition() {
@@ -139,14 +138,51 @@ public class EcatCoreRuoyiIntegration extends IntegrationBase {
 
     }
 
+    /**
+     * 租户装载唯一入口,兼宿主代理迁移挂点:租户 onStart 首段调用本方法——方法体先做
+     * 代理迁移(注册即发现:扫租户 jar 约定目录),成功后才委托
+     * {@link RuoyiJarApp#loadJarAndVue} 装载租户后端。「先迁后装」=与旧接线
+     * (租户 onStart 内先迁后装)时序逐位等价;迁移失败=异常原样上抛,租户不装载
+     * (结构不明不装载)。
+     *
+     * @param targetClassLoader 租户 jar 加载器(装载动作入参)
+     * @param target            租户集成对象(其类所在 jar 即约定目录扫描锚)
+     */
     public void loadJarAndVue(URLClassLoader targetClassLoader, IntegrationBase target) throws Exception {
+        migrateTenantDomainBeforeLoad(target);
         if (isRuoyiStarted && ruoyiJarApp != null) {
             ruoyiJarApp.loadJarAndVue(targetClassLoader, target);
         } else {
             throw new IllegalStateException("EcatCoreRuoyiIntegration integration is not started yet.");
         }
-        // this.loadJar(targetClassLoader);
-        // this.loadVue(targetClassLoader, target);
+    }
+
+    /**
+     * 租户域代理迁移(先迁后装,方法体首执行):扫租户 jar 约定目录 db/migration-&lt;域名&gt;——
+     * 无目录(纯协议集成/冻结族)=非迁移用户,直接放行装载;有目录=dbm 入口②两态迁移,
+     * 表就绪先于租户后端装载。DS 获取与自身域执行点同源(ruoyi Spring 容器反射桥),
+     * 桥未就绪或容器缺 Bean 时显式失败——禁 null 容忍静默放行。
+     *
+     * <p>target==this 自守卫:宿主自身域 ruoyi-sys 是第一个租户,但走 onStart 内
+     * {@link #runRuoyiSysMigration} 执行点(Spring 就绪后),不经本租户路径——防同锚
+     * 双跑,也防宿主自身被误当租户扫(本类不载于自身产物 jar,约定目录扫描对它无意义)。</p>
+     */
+    private void migrateTenantDomainBeforeLoad(IntegrationBase target) {
+        if (target == this) {
+            return;
+        }
+        String domain = DbMigrationFacade.findMigrationDomain(target.getClass());
+        if (domain == null) {
+            log.info("租户 jar 无迁移约定目录,跳过迁移直接装载: tenant={}", target.getClass().getName());
+            return;
+        }
+        DataSource ds = getSpringBean(DataSource.class);
+        if (ds == null) {
+            throw new IllegalStateException(
+                    "ruoyi Spring 容器未提供 DataSource Bean,租户域 " + domain + " 迁移中止,租户不装载");
+        }
+        DbMigrationFacade.migrateDomain(target.getClass(), ds);
+        log.info("租户域迁移完成(先迁后装): domain={}, tenant={}", domain, target.getClass().getName());
     }
 
     public boolean checkSpringBean(String beanName) {
@@ -189,12 +225,12 @@ public class EcatCoreRuoyiIntegration extends IntegrationBase {
     }
 
     /**
-     * ruoyi-sys 域启动期自迁移,两态接线:有账本表直接 migrate(照账本补刀,幂等);
-     * 无账本表先 baseline("0") 建账再 migrate(空库放行全量;0<4.0.0,V4.0.0 不被挡)。
-     * 未接管存量库在 migrate 处撞已存在表显式报错(「该域未接管」信号)——禁静默兜底。
-     * 失败=明确异常上抛,调用方不得装载叶子(结构不明不装载)。
-     * 资源扫描类加载器由门面经 resourceAnchor(本类字面量)取得——桥仓脚本在桥 jar 内,
-     * 唯此加载器可见;TCCL 由引擎侧禁用,调用方零线程状态操作。
+     * ruoyi-sys 域启动期自迁移执行点(原位原时机:Spring 就绪后、叶子可装载前)。
+     * 宿主自身域=第一个租户,同走 dbm 入口② {@link DbMigrationFacade#migrateDomain},
+     * 锚=本类字面量——桥仓脚本在桥 jar 内唯此加载器可见,两态策略(有账本 migrate
+     * 补刀/无账本 baseline("0") 建账再 migrate 全量)已内聚进 dbm 单点,本类不再持有
+     * 两态接线。失败=明确异常上抛,调用方不得装载叶子(结构不明不装载);TCCL 由
+     * 引擎侧禁用,调用方零线程状态操作。
      */
     void runRuoyiSysMigration() {
         DataSource ds = getSpringBean(DataSource.class);
@@ -202,15 +238,24 @@ public class EcatCoreRuoyiIntegration extends IntegrationBase {
             throw new IllegalStateException(
                     "ruoyi Spring 容器未提供 DataSource Bean,ruoyi-sys 域迁移中止,叶子不装载");
         }
-        if (DbMigrationFacade.hasHistoryTable(DB_DOMAIN, ds)) {
-            DbMigrationFacade.migrate(DB_DOMAIN, ds,
-                    Collections.singletonList(DB_LOCATION), EcatCoreRuoyiIntegration.class);
-        } else {
-            DbMigrationFacade.baseline(DB_DOMAIN, ds, "0");
-            DbMigrationFacade.migrate(DB_DOMAIN, ds,
-                    Collections.singletonList(DB_LOCATION), EcatCoreRuoyiIntegration.class);
-        }
+        DbMigrationFacade.migrateDomain(EcatCoreRuoyiIntegration.class, ds);
         log.info("ruoyi-sys 域迁移完成");
+    }
+
+    /**
+     * 备份钩子·空跑模式(2026-10-08 裁定本轮不真备份):升级窗程序的派发、账本、日志面
+     * 全真实,本实现零数据副本零外部命令,正常返回不参与窗口成败。真实形态=全库
+     * pg_dump 已定稿待启用——启用时只改 {@link #backup()}/{@link #restore()} 两方法体,
+     * 窗协议与派发面不动。
+     */
+    @Override
+    public void backup() {
+        log.info("[BackupHook] backup 空跑完成: 零数据副本零外部命令, ts={}", LocalDateTime.now());
+    }
+
+    @Override
+    public void restore() {
+        log.info("[BackupHook] restore 空跑完成: 零数据副本零外部命令, ts={}", LocalDateTime.now());
     }
 
 }

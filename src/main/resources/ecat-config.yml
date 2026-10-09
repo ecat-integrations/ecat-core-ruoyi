@@ -8,12 +8,6 @@ dependencies:
   - artifactId: integration-ecat-db-migration
     groupId: com.ecat
     version: ^4.0.0
-db:
-  domain: ruoyi-sys
-  engine: pg
-  mechanism: flyway
-  historyTable: flyway_schema_history_ruoyi-sys
-  dumpPolicy: "table-family:sys_*,qrtz_*,gen_*"
 web-platform:
   ui: false
   api: false

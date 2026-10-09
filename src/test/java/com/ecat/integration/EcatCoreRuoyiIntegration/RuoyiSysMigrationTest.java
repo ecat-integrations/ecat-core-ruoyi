@@ -7,11 +7,10 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.same;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -23,7 +22,6 @@ import java.lang.reflect.Field;
 import java.net.URLClassLoader;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 
 import javax.sql.DataSource;
@@ -33,18 +31,21 @@ import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 
+import com.ecat.core.Integration.IntegrationBase;
 import com.ecat.core.Integration.IntegrationLoadOption;
 import com.ecat.integration.EcatDbMigration.DbMigrationException;
 import com.ecat.integration.EcatDbMigration.DbMigrationFacade;
 
 /**
- * ruoyi-sys 域执行点接线单测,两层覆盖:
+ * 迁移接线单测,两层覆盖:
  * 一、onStart 级(守卫真实走,不桩化 getSpringBean)——RuoyiJarApp(外部进程面)以
  * mockConstruction 替身,锁死迁移期反射桥守卫真实放行、迁移先于叶子类加载器注册、
  * 桥就绪但容器缺 DataSource Bean 时显式拒绝;
- * 二、包私有直调级(非守卫路径)——getSpringBean 经 spy 定向桩(桥就绪为前提),
- * 覆盖两态分支路由、调用参数锚定、门面失败穿透;resourceAnchor 资源可见性为纯静态断言。
- * 全模拟零 IO,门面静态调用经 mockStatic 打桩,测试缝=包私有 runRuoyiSysMigration。
+ * 二、包私有直调级——自身域执行点 runRuoyiSysMigration(入口②单调用形态,两态已内聚
+ * 进 dbm 单点,由 dbm 仓测试锁定)与租户路径 loadJarAndVue(先迁后装、自守卫、失败
+ * 穿透、缺 Bean 显式拒绝);resourceAnchor 资源可见性为纯静态断言。
+ * 全模拟零 IO,门面静态调用经 mockStatic 打桩,测试缝=包私有 runRuoyiSysMigration
+ * 与公开 loadJarAndVue。
  */
 public class RuoyiSysMigrationTest {
 
@@ -56,6 +57,14 @@ public class RuoyiSysMigrationTest {
         EcatCoreRuoyiIntegration integration = spy(new EcatCoreRuoyiIntegration());
         doReturn(ds).when(integration).getSpringBean(DataSource.class);
         return integration;
+    }
+
+    /** 注入桥就绪运行态(isRuoyiStarted 旗标 + ruoyiJarApp 替身),供租户路径直调。 */
+    private RuoyiJarApp readyBridge(EcatCoreRuoyiIntegration integration) {
+        RuoyiJarApp app = mock(RuoyiJarApp.class);
+        setPrivateField(integration, "isRuoyiStarted", true);
+        setPrivateField(integration, "ruoyiJarApp", app);
+        return app;
     }
 
     /** 反射注入私有字段(含父类声明字段,如 loadOption):测试缝,非生产语义。 */
@@ -76,6 +85,22 @@ public class RuoyiSysMigrationTest {
         throw new IllegalStateException("测试反射注入失败,字段不存在: " + fieldName);
     }
 
+    /** 测试用哑租户:仅作 target 载体;门面静态调用已打桩,类代码源不参与断言。 */
+    static class DummyTenant extends IntegrationBase {
+
+        @Override
+        public void onInit() {
+        }
+
+        @Override
+        public void onStart() {
+        }
+
+        @Override
+        public void onPause() {
+        }
+    }
+
     @Test
     public void onStartMigrationExecutesWithGuardOpenAndRegistersAfter() {
         EcatCoreRuoyiIntegration integration = new EcatCoreRuoyiIntegration();
@@ -94,11 +119,8 @@ public class RuoyiSysMigrationTest {
                     when(app.getSpringBean(DataSource.class)).thenReturn(ds);
                 });
                 MockedStatic<DbMigrationFacade> facade = Mockito.mockStatic(DbMigrationFacade.class)) {
-            facade.when(() -> DbMigrationFacade.hasHistoryTable("ruoyi-sys", ds)).thenReturn(true);
             integration.onStart();
-            facade.verify(() -> DbMigrationFacade.migrate("ruoyi-sys", ds,
-                    Collections.singletonList("classpath:db/migration-ruoyi-sys"),
-                    EcatCoreRuoyiIntegration.class));
+            facade.verify(() -> DbMigrationFacade.migrateDomain(EcatCoreRuoyiIntegration.class, ds));
         }
         verify(loadOption).setChildClassLoader(fakeChildClassLoader);
     }
@@ -150,13 +172,11 @@ public class RuoyiSysMigrationTest {
     public void facadeExceptionPassesThroughUnwrapped() {
         DataSource ds = mock(DataSource.class);
         EcatCoreRuoyiIntegration integration = integrationReturning(ds);
-        DbMigrationException boom = DbMigrationException.of("ruoyi-sys", "migrate",
+        DbMigrationException boom = DbMigrationException.of("ruoyi-sys", "migrateDomain",
                 new RuntimeException("checksum mismatch for V4.0.0__init.sql"));
         try (MockedStatic<DbMigrationFacade> facade = Mockito.mockStatic(DbMigrationFacade.class)) {
-            facade.when(() -> DbMigrationFacade.hasHistoryTable("ruoyi-sys", ds)).thenReturn(true);
-            facade.when(() -> DbMigrationFacade.migrate("ruoyi-sys", ds,
-                    Collections.singletonList("classpath:db/migration-ruoyi-sys"),
-                    EcatCoreRuoyiIntegration.class)).thenThrow(boom);
+            facade.when(() -> DbMigrationFacade.migrateDomain(EcatCoreRuoyiIntegration.class, ds))
+                    .thenThrow(boom);
             try {
                 integration.runRuoyiSysMigration();
                 fail("迁移失败必须沿执行点原样上抛");
@@ -167,59 +187,111 @@ public class RuoyiSysMigrationTest {
     }
 
     @Test
-    public void migrateCalledWithExactParamsWhenHistoryTableExists() {
+    public void migrateDomainCalledWithExactAnchorAndDataSource() {
         DataSource ds = mock(DataSource.class);
         EcatCoreRuoyiIntegration integration = integrationReturning(ds);
-        List<String> calls = new ArrayList<>();
         try (MockedStatic<DbMigrationFacade> facade = Mockito.mockStatic(DbMigrationFacade.class)) {
-            facade.when(() -> DbMigrationFacade.hasHistoryTable("ruoyi-sys", ds)).thenReturn(true);
-            facade.when(() -> DbMigrationFacade.baseline(anyString(), any(DataSource.class), anyString()))
-                    .thenAnswer(invocation -> {
-                        calls.add("baseline");
-                        return null;
-                    });
-            facade.when(() -> DbMigrationFacade.migrate(anyString(), any(DataSource.class), anyList(),
-                    any(Class.class))).thenAnswer(invocation -> {
-                        calls.add("migrate");
-                        return null;
-                    });
             integration.runRuoyiSysMigration();
-            facade.verify(() -> DbMigrationFacade.migrate("ruoyi-sys", ds,
-                    Collections.singletonList("classpath:db/migration-ruoyi-sys"),
-                    EcatCoreRuoyiIntegration.class));
+            facade.verify(() -> DbMigrationFacade.migrateDomain(EcatCoreRuoyiIntegration.class, ds));
+            // 两态已内聚进 dbm 单点:宿主侧禁止残留旧原语接线(hasHistoryTable/baseline/migrate)
+            facade.verify(() -> DbMigrationFacade.migrate(anyString(), any(DataSource.class),
+                    any(List.class), any(Class.class)), never());
+            facade.verify(() -> DbMigrationFacade.baseline(anyString(), any(DataSource.class),
+                    anyString()), never());
+            facade.verify(() -> DbMigrationFacade.hasHistoryTable(anyString(), any(DataSource.class)),
+                    never());
         }
-        assertFalse("有账本分支禁 baseline 调用(防双盖标)", calls.contains("baseline"));
     }
 
     @Test
-    public void routesToBaselineThenMigrateWhenNoHistoryTable() {
-        DataSource ds = mock(DataSource.class);
-        EcatCoreRuoyiIntegration integration = integrationReturning(ds);
-        List<String> calls = new ArrayList<>();
-        List<String> baselineVersions = new ArrayList<>();
+    public void selfTargetSkipsTenantMigrationPath() throws Exception {
+        EcatCoreRuoyiIntegration integration = spy(new EcatCoreRuoyiIntegration());
+        RuoyiJarApp app = readyBridge(integration);
         try (MockedStatic<DbMigrationFacade> facade = Mockito.mockStatic(DbMigrationFacade.class)) {
-            facade.when(() -> DbMigrationFacade.hasHistoryTable(eq("ruoyi-sys"), same(ds)))
-                    .thenAnswer(invocation -> {
-                        calls.add("hasHistoryTable");
-                        return false;
-                    });
-            facade.when(() -> DbMigrationFacade.baseline(anyString(), any(DataSource.class), anyString()))
-                    .thenAnswer(invocation -> {
-                        calls.add("baseline");
-                        baselineVersions.add(invocation.getArgument(2));
-                        return null;
-                    });
-            facade.when(() -> DbMigrationFacade.migrate(anyString(), any(DataSource.class), anyList(),
-                    any(Class.class))).thenAnswer(invocation -> {
-                        calls.add("migrate");
-                        return null;
-                    });
-            integration.runRuoyiSysMigration();
+            integration.loadJarAndVue(mock(URLClassLoader.class), integration);
+            facade.verifyNoInteractions();
         }
-        assertEquals("无账本须先 baseline(\"0\") 建账再 migrate,顺序与形态固定",
-                Arrays.asList("hasHistoryTable", "baseline", "migrate"), calls);
-        assertEquals("baseline 盖标版本字面量固定 \"0\"(0<4.0.0,V4.0.0 不被挡)",
-                Collections.singletonList("0"), baselineVersions);
+        verify(app).loadJarAndVue(any(URLClassLoader.class), same(integration));
+    }
+
+    @Test
+    public void tenantWithoutMigrationDirectoryLoadsDirectly() throws Exception {
+        EcatCoreRuoyiIntegration integration = integrationReturning(mock(DataSource.class));
+        RuoyiJarApp app = readyBridge(integration);
+        IntegrationBase tenant = new DummyTenant();
+        try (MockedStatic<DbMigrationFacade> facade = Mockito.mockStatic(DbMigrationFacade.class)) {
+            facade.when(() -> DbMigrationFacade.findMigrationDomain(DummyTenant.class)).thenReturn(null);
+            integration.loadJarAndVue(mock(URLClassLoader.class), tenant);
+            facade.verify(() -> DbMigrationFacade.migrateDomain(any(Class.class), any(DataSource.class)),
+                    never());
+        }
+        verify(app).loadJarAndVue(any(URLClassLoader.class), same(tenant));
+    }
+
+    @Test
+    public void tenantWithDomainMigratesBeforeLoad() throws Exception {
+        EcatCoreRuoyiIntegration integration = integrationReturning(mock(DataSource.class));
+        RuoyiJarApp app = readyBridge(integration);
+        IntegrationBase tenant = new DummyTenant();
+        List<String> order = new ArrayList<>();
+        try (MockedStatic<DbMigrationFacade> facade = Mockito.mockStatic(DbMigrationFacade.class)) {
+            facade.when(() -> DbMigrationFacade.findMigrationDomain(DummyTenant.class)).thenReturn("alarm-x");
+            facade.when(() -> DbMigrationFacade.migrateDomain(any(Class.class), any(DataSource.class)))
+                    .thenAnswer(invocation -> {
+                        order.add("migrateDomain");
+                        return null;
+                    });
+            doAnswer(invocation -> {
+                order.add("load");
+                return null;
+            }).when(app).loadJarAndVue(any(URLClassLoader.class), same(tenant));
+            integration.loadJarAndVue(mock(URLClassLoader.class), tenant);
+        }
+        assertEquals("先迁后装:迁移完成才发生租户装载动作", Arrays.asList("migrateDomain", "load"), order);
+        verify(app).loadJarAndVue(any(URLClassLoader.class), same(tenant));
+    }
+
+    @Test
+    public void tenantMigrationFailureBlocksLoadAndPropagatesRaw() throws Exception {
+        EcatCoreRuoyiIntegration integration = integrationReturning(mock(DataSource.class));
+        RuoyiJarApp app = readyBridge(integration);
+        IntegrationBase tenant = new DummyTenant();
+        DbMigrationException boom = DbMigrationException.of("alarm-x", "migrateDomain",
+                new RuntimeException("V script boom"));
+        try (MockedStatic<DbMigrationFacade> facade = Mockito.mockStatic(DbMigrationFacade.class)) {
+            facade.when(() -> DbMigrationFacade.findMigrationDomain(DummyTenant.class)).thenReturn("alarm-x");
+            facade.when(() -> DbMigrationFacade.migrateDomain(any(Class.class), any(DataSource.class)))
+                    .thenThrow(boom);
+            try {
+                integration.loadJarAndVue(mock(URLClassLoader.class), tenant);
+                fail("租户迁移失败必须原样上抛,租户不装载");
+            } catch (DbMigrationException e) {
+                assertSame("引擎异常须原样穿透,禁包裹或改写", boom, e);
+            }
+        }
+        verify(app, never()).loadJarAndVue(any(URLClassLoader.class), any(IntegrationBase.class));
+    }
+
+    @Test
+    public void tenantPathWithoutDataSourceBeanRejectsExplicitly() throws Exception {
+        EcatCoreRuoyiIntegration integration = integrationReturning(null);
+        RuoyiJarApp app = readyBridge(integration);
+        IntegrationBase tenant = new DummyTenant();
+        try (MockedStatic<DbMigrationFacade> facade = Mockito.mockStatic(DbMigrationFacade.class)) {
+            facade.when(() -> DbMigrationFacade.findMigrationDomain(DummyTenant.class)).thenReturn("alarm-x");
+            try {
+                integration.loadJarAndVue(mock(URLClassLoader.class), tenant);
+                fail("容器缺 DataSource Bean 时租户迁移必须显式失败,租户不装载");
+            } catch (IllegalStateException e) {
+                assertTrue("消息应含 DataSource Bean 语境,实际: " + e.getMessage(),
+                        e.getMessage().contains("DataSource Bean"));
+                assertTrue("消息应含租户域 alarm-x,实际: " + e.getMessage(),
+                        e.getMessage().contains("alarm-x"));
+            }
+            facade.verify(() -> DbMigrationFacade.migrateDomain(any(Class.class), any(DataSource.class)),
+                    never());
+        }
+        verify(app, never()).loadJarAndVue(any(URLClassLoader.class), any(IntegrationBase.class));
     }
 
     @Test

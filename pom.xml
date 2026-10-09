@@ -38,6 +38,14 @@
       <artifactId>mockito-inline</artifactId>
       <scope>test</scope>
     </dependency>
+    <!-- PG JDBC 驱动:HostAgentMigrationPgIT 真库 IT 门控激活(-Decat.e2e=true + PG 环境变量齐
+         才执行,默认恒跳过);test scope 不进 fatjar lib/,运行时驱动由 ruoyi 平台侧供给 -->
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <version>42.2.27</version>
+      <scope>test</scope>
+    </dependency>
     <dependency>
       <groupId>org.projectlombok</groupId>
       <artifactId>lombok</artifactId>
